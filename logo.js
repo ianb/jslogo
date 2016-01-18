@@ -2130,7 +2130,14 @@ function LogoInterpreter(turtle, stream, savehook, parent, procName)
     if (! logo) {
       throw new Error(format(__("Child {procName:U} does not or no longer exists"), { procName: procName }));
     }
-    return logo.run(question, {returnResult: true});
+    return logo.execute(question, {returnResult: true});
+  });
+
+  def ("wait", function(milliseconds) {
+    milliseconds = aexpr(milliseconds);
+    return new Promise(function (resolve, reject) {
+      setTimeout(resolve, milliseconds);
+    });
   });
 
   //----------------------------------------------------------------------
