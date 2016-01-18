@@ -28,6 +28,15 @@ function CanvasTurtle(canvas_ctx, turtle_ctx, width, height) {
   self.speed = 3;
   self.speed_interval = 25;
 
+  self.clone = function() {
+    // FIXME: not sure I should share turtle_ctx?
+    var t = new self.constructor(canvas_ctx, turtle_ctx, width, height);
+    "speed speed_interval filling down turtlemode x y r colorAlias color width penmode fontsize".split(/\s+/g).forEach(function (attr) {
+      t[attr] = self[attr];
+    });
+    return t;
+  };
+
   function moveto(x, y, fast) {
     function _go(x1, y1, x2, y2) {
       if (fast) {

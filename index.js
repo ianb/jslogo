@@ -213,13 +213,27 @@ function initInput() {
       logo.run(v).then(function () {
         setRun(true);
       }).catch(function (e) {
-        error.innerHTML = '';
-        error.appendChild(document.createTextNode(e.message));
-        error.classList.add('shown');
         setRun(true);
       });
     }, 100);
   }
+
+  function onerror(event) {
+    var error = $('#display #error');
+    error.innerHTML = '';
+    var message = event.error.message;
+    if (event.interpreter.procName) {
+      message += " (in " + event.interpreter.procName + ")";
+    }
+    error.appendChild(document.createTextNode(message));
+    error.classList.add('shown');
+    console.log("Error:", event);
+    if (event.error.stack) {
+      console.log("Stack:\n" + event.error.stack);
+    }
+  }
+
+  logo.onerror = onerror;
 
   function stop() {
     logo.bye();

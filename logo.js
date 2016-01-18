@@ -16,8 +16,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+var gensym_index = 0;
+var proc_gensym_index = 0;
+
 //----------------------------------------------------------------------
-function LogoInterpreter(turtle, stream, savehook)
+function LogoInterpreter(turtle, stream, savehook, parent, procName)
 //----------------------------------------------------------------------
 {
   var self = this;
@@ -172,6 +175,51 @@ function LogoInterpreter(turtle, stream, savehook)
     });
   }
 
+  function CascadingStringMap(parent, case_fold) {
+    var map = new Map();
+    Object.assign(this, {
+      get: function(key) {
+        key = case_fold ? String(key).toLowerCase() : String(key);
+        if (map.has(key)) {
+          return map.get(key);
+        } else {
+          return parent.get(key);
+        }
+      },
+      set: function(key, value) {
+        key = case_fold ? String(key).toLowerCase() : String(key);
+        map.set(key, value);
+      },
+      has: function(key) {
+        key = case_fold ? String(key).toLowerCase() : String(key);
+        return map.has(key) || parent.has(key);
+      },
+      delete: function(key) {
+        key = case_fold ? String(key).toLowerCase() : String(key);
+        return map.delete(key);
+      },
+      keys: function() {
+        var keys = [];
+        map.forEach(function(value, key) { keys.push(key); });
+        return keys;
+      },
+      empty: function() {
+        return map.size === 0 && parent.size === 0;
+      },
+      forEach: function(fn) {
+        map.forEach(function(value, key) {
+          fn(key, value);
+        });
+        parent.forEach(function(value, key) {
+          if (! map.has(key)) {
+            fn(key, value);
+          }
+        });
+      }
+    });
+  }
+
+
   function LogoArray(size, origin) {
     this.array = [];
     this.array.length = size;
@@ -215,13 +263,57 @@ function LogoInterpreter(turtle, stream, savehook)
   //
   //----------------------------------------------------------------------
 
+  self._allProcs = function() {
+    if (this.parent) {
+      return this.parent._allProcs();
+    }
+    return this._allProcMapping;
+  };
+
   self.turtle = turtle;
   self.stream = stream;
-  self.routines = new StringMap(true);
   self.scopes = [new StringMap(true)];
-  self.plists = new StringMap(true);
   self.prng = new PRNG(Math.random() * 0x7fffffff);
   self.forceBye = false;
+  self.parent = parent;
+  self.procName = procName;
+  self.onerror = null;
+  if (procName) {
+    if (! parent) {
+      throw new Error("Error: procName given without parent");
+    }
+    self._allProcs().set(self.procName, self);
+    self.scopes = parent.scopes.concat(self.scopes);
+    // FIXME: should routines just be flat across all interpreters?  I.e., all definitions happen in the parent?
+    self.routines = new CascadingStringMap(parent.routines, true);
+    logo.plists = new CascadingStringMap(self.plists, true);
+
+  } else {
+    self._allProcMapping = new StringMap(true);
+    self.routines = new StringMap(true);
+    self.plists = new StringMap(true);
+  }
+
+  self.spawn = function() {
+    proc_gensym_index++;
+    var procName = "P" + proc_gensym_index;
+    // FIXME: not sure if savehook should be shared
+    var logo = new self.constructor(self.turtle.clone(), self.stream, savehook, self, procName);
+    return logo;
+  };
+
+  self.terminate = function() {
+    if (! this.parent) {
+      throw new Error("You can only terminate spawned interpreters");
+    }
+    this.bye();
+    // FIXME: ideally we'd wait until the process stopped to do this:
+    this._allProcs().delete(this.procName);
+  };
+
+  self.getProc = function(procName) {
+    return this._allProcs().get(procName);
+  };
 
   //----------------------------------------------------------------------
   //
@@ -933,7 +1025,13 @@ function LogoInterpreter(turtle, stream, savehook)
     if (self.turtle) { self.turtle.begin(); }
 
     // Parse it
-    var atoms = parse(string);
+    var atoms;
+    if (Array.isArray(string)) {
+      // Already parsed
+      atoms = string;
+    } else {
+      atoms = parse(string);
+    }
 
     // And execute it!
     var promise = self.execute(atoms, options).then(function (result) {
@@ -947,6 +1045,18 @@ function LogoInterpreter(turtle, stream, savehook)
       }
       if (err && (err.special == "bye" || err.special == "stop")) {
         return undefined;
+      }
+      var interp = self;
+      while (interp) {
+        if (interp.onerror) {
+          interp.onerror({
+            error: err,
+            interpreter: self,
+            source: string,
+            sourceParsed: atoms
+          });
+        }
+        interp = interp.parent;
       }
       throw err;
     });
@@ -1268,7 +1378,6 @@ function LogoInterpreter(turtle, stream, savehook)
     return sifw(list, lexpr(list).reverse());
   });
 
-  var gensym_index = 0;
   def("gensym", function() {
     gensym_index += 1;
     return 'G' + gensym_index;
@@ -1980,6 +2089,49 @@ function LogoInterpreter(turtle, stream, savehook)
   // Not Supported: clickpos
   // Not Supported: buttonp
   // Not Supported: button
+
+  // Turtle multiprocessing
+
+  self.lastspawned = null;
+
+  def("spawn", function(statements) {
+    var logo = self.spawn();
+    self.lastspawned = logo.procName;
+    logo.run(statements);
+  });
+
+  def("lastspawned", function() {
+    return self.lastspawned || [];
+  });
+
+  def("stopspawned", function(procName) {
+    if (! procName) {
+      procName = self.routines.lastspawned();
+    }
+    var logo = self._allProcs().get(procName);
+    if (logo) {
+      logo.terminate();
+      if (procName == self.lastspawned) {
+        self.lastspawned = null;
+      }
+    }
+  });
+
+  def("sendspawn", function(procName, statements) {
+    var logo = self._allProcs().get(procName);
+    if (! logo) {
+      throw new Error(format(__("Child {procName:U} does not or no longer exists"), { procName: procName }));
+    }
+    logo.run(statements);
+  });
+
+  def("askspawn", function(procName, question) {
+    var logo = self._allProcs().get(procName);
+    if (! logo) {
+      throw new Error(format(__("Child {procName:U} does not or no longer exists"), { procName: procName }));
+    }
+    return logo.run(question, {returnResult: true});
+  });
 
   //----------------------------------------------------------------------
   //
